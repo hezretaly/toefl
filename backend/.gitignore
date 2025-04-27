@@ -4,6 +4,13 @@ __pycache__
 instance
 uploads
 
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+
+migrations
+
 ideas
 remarks
 todo

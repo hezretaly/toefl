@@ -5,13 +5,16 @@ import jwt
 from functools import wraps
 import os
 import json
+import uuid
+
+from sqlalchemy.orm import joinedload # For eager loading relationships
 
 from flask_cors import CORS
 
 # Initialize Flask app
 app = Flask(__name__)
 CORS(app, resources={r"/*": {
-    "origins": "http://localhost:5173",  # Match your React frontend origin
+    "origins": ["http://localhost:5173", "http://localhost:8080"],  # Match your React frontend origin
     "methods": ["GET", "POST", "OPTIONS"],  # Include OPTIONS for preflight
     "allow_headers": ["Content-Type", "Authorization"]  # Allow JSON headers
 }})
@@ -134,84 +137,124 @@ from models import db, User, Section, ListeningAudio, ReadingPassage, \
 
 db.init_app(app)
 
+from flask_migrate import Migrate
+
+migrate = Migrate(app, db)
+
+
+migrate.init_app(app, db) # <<< Initialize migrate HERE
+
+
 
 def create_question(question_data, section_type, reading_passage_id=None, listening_audio_id=None, audio_file=None):
+    """Creates a question and adds it to the session, but does NOT commit.""" # below line is changed // Docstring update
+
+    # # below is a new code
+    # Extract paragraph_index specifically for reading questions
+    paragraph_index_val = None
+    if section_type == 'reading':
+        paragraph_index_val = question_data.get('paragraph_index')
+        # Optional: Add validation if needed
+        if paragraph_index_val is not None and not isinstance(paragraph_index_val, int):
+             print(f"Warning: Invalid paragraph_index type received: {paragraph_index_val}. Setting to None.")
+             paragraph_index_val = None # Or raise an error: raise ValueError("paragraph_index must be an integer or null")
+    # # above is a new code
+
     # Create the question
     question = Question(
         section_type=section_type,
         type=question_data['type'],
         prompt=question_data['prompt'],
         reading_passage_id=reading_passage_id if section_type == 'reading' else None,
-        listening_audio_id=listening_audio_id if section_type == 'listening' else None
+        listening_audio_id=listening_audio_id if section_type == 'listening' else None,
+        paragraph_index=paragraph_index_val # below line is changed // Assign the extracted paragraph_index
     )
     db.session.add(question)
     db.session.flush()  # Ensure question.id is available
 
-    # Handle options and correct answers for insert-a-text or multiple-choice (single or multiple)
-    # not details instead options and correct_answers
-    # would have to implement if the inserted question options and corrects exist in the question_data
+    question_id_for_debug = question.id
+
+    # --- The rest of the option/correct answer/table handling logic remains the same ---
+    # Handle options and correct answers
     if question.type in ['multiple_to_multiple', 'insert_text', 'multiple_to_single', 'audio', 'prose_summary']:
         if question.type == 'audio' and audio_file:
-            # Save the audio file
             audio_url = save_file(audio_file, 'question_audios')
-
-            # Create QuestionAudio record
-            question_audio = QuestionAudio(
-                question_id=question.id,
-                audio_url=audio_url
-            )
+            question_audio = QuestionAudio(question_id=question.id, audio_url=audio_url)
             db.session.add(question_audio)
-        
+
         if question.type == 'insert_text':
             options = ['a','b','c','d']
         else:
-            options = question_data['options']
+            options = question_data.get('options', [])
 
-        if question.type in ['insert_text', 'multiple_to_single', 'audio']:
-            corrects = [question_data['correct_answer']]
-        else:
-            corrects = question_data['correct_answers']
+        print(f"DEBUG INSIDE create_question (ID: {question_id_for_debug}): Received options list: {options}")
 
-        # Map options to their database objects
-        option_map = {}
+        if question.type in ['multiple_to_single', 'audio']:
+            correct_option_index = question_data.get('correctOptionIndex')
+            corrects = [correct_option_index] if isinstance(correct_option_index, int) else []
+        elif question.type == 'insert_text':
+            insertion_point_text = question_data.get('correctInsertionPoint')
+            try:
+                # Ensure options list is populated before using index
+                corrects = [options.index(insertion_point_text)] if insertion_point_text in options else []
+            except ValueError:
+                 print(f"Warning: Correct insertion point '{insertion_point_text}' not found in options for question {question.id}")
+                 corrects = []
+        else: # multiple_to_multiple, prose_summary
+            correct_indices = question_data.get('correctAnswerIndices', [])
+            # Ensure indices are valid integers
+            corrects = [idx for idx in correct_indices if isinstance(idx, int)]
+
+        option_objects = []
         for opt_text in options:
             option = Option(question=question, option_text=opt_text)
             db.session.add(option)
-            option_map[opt_text] = option
+            option_objects.append(option)
 
-        # Add each correct answer to the CorrectAnswer table
-        for correct_text in corrects:
-            if correct_text in option_map:
-                db.session.add(CorrectAnswer(question=question, option=option_map[correct_text]))
+        db.session.flush() # Flush after adding options to ensure they exist before adding correct answers
 
-    # Handle table questions (already supports multiple correct answers)
+        for correct_index in corrects:
+            if 0 <= correct_index < len(option_objects):
+                correct_option_object = option_objects[correct_index]
+                db.session.add(CorrectAnswer(question=question, option=correct_option_object))
+            else:
+                print(f"Warning: Correct answer index {correct_index} is out of bounds for question {question.id}. Options len: {len(option_objects)}")
+
+    # Handle table questions
     elif question.type == 'table':
-        # question_data instead of details
-        rows = question_data['rows']
-        columns = question_data['columns']
-        correct_answers = question_data['correct_selections'] # correct_selections for table correct answers
+        rows = question_data.get('rows', [])
+        columns = question_data.get('columns', [])
+        correct_answers = question_data.get('correctTableSelections', [])
 
-        # Create row objects
-        row_map = {row_label: TableQuestionRow(question=question, row_label=row_label) 
-                   for row_label in rows}
-        for row in row_map.values():
-            db.session.add(row)
+        row_objects = []
+        for row_label in rows:
+            row_obj = TableQuestionRow(question=question, row_label=row_label)
+            db.session.add(row_obj)
+            row_objects.append(row_obj)
 
-        # Create column objects
-        column_map = {col_label: TableQuestionColumn(question=question, column_label=col_label) 
-                      for col_label in columns}
-        for col in column_map.values():
-            db.session.add(col)
+        column_objects = []
+        for col_label in columns:
+            col_obj = TableQuestionColumn(question=question, column_label=col_label)
+            db.session.add(col_obj)
+            column_objects.append(col_obj)
 
-        # Add correct answers (supports multiple)
+        db.session.flush() # Flush after adding rows/columns
+
         for ca in correct_answers:
-            row = row_map.get(ca['row'])
-            column = column_map.get(ca['column'])
-            if row and column:
-                db.session.add(CorrectAnswer(question=question, table_row=row, table_column=column))
+            row_index = ca.get('rowIndex')
+            col_index = ca.get('colIndex')
 
-    db.session.commit()
-    return question
+            if isinstance(row_index, int) and 0 <= row_index < len(row_objects) and \
+               isinstance(col_index, int) and 0 <= col_index < len(column_objects):
+                correct_row_object = row_objects[row_index]
+                correct_column_object = column_objects[col_index]
+                print(f"Mapping Table Correct Answer: Row='{correct_row_object.row_label}' (Index {row_index}), Col='{correct_column_object.column_label}' (Index {col_index})")
+                db.session.add(CorrectAnswer(question=question, table_row=correct_row_object, table_column=correct_column_object))
+            else:
+                print(f"Warning: Invalid table selection indices (row: {row_index}, col: {col_index}) for question {question.id}")
+
+    # db.session.commit() # below line is changed // REMOVE commit from here
+    return question # Return the question object added to the session
 
 # Before request handler
 @app.before_request
@@ -272,7 +315,7 @@ def register():
                 'username': user.username,
                 'email': user.email
             }
-        }),
+        }), 201
 
 # Login endpoint
 @app.route('/login', methods=['POST'])
@@ -347,31 +390,49 @@ def create_reading_section():
     if not passages_data:
         return jsonify({'error': 'No passages provided'}), 400
 
-    section = Section(section_type='reading', title=title)
-    db.session.add(section)
+    try: # Add try...except block for robust error handling
+        section = Section(section_type='reading', title=title)
+        db.session.add(section)
+        # Flush here is okay if you need the section ID *before* adding passages,
+        # but often adding all then flushing/committing at the end is fine too.
+        # db.session.flush()
 
-    for passage_data in passages_data:
-        title = passage_data.get('title')
-        text = passage_data.get('text')
-        if not title or not text:
-            return jsonify({'error': 'Missing title or text in passage'}), 400
+        created_passages_info = [] # To store info for the response
 
-        passage = ReadingPassage(title=title, content=text, section=section)
-        db.session.add(passage)
-        db.session.flush() # id is not released until flushed or comitted (don't want to commit, yet)
-        
-        for question_data in passage_data.get('questions', []):
-            print('before creating question: ', question_data)
-            create_question(question_data, 'reading', reading_passage_id=passage.id)
+        for passage_data in passages_data:
+            passage_title = passage_data.get('title')
+            content = passage_data.get('content')
+            if not passage_title or not content:
+                # Rollback because data is invalid
+                db.session.rollback()
+                return jsonify({'error': 'Missing title or content in passage'}), 400
 
-    db.session.commit()
-    
-    return jsonify({
-        'id': section.id,
-        'title': section.title,
-        'passages': [{'id': p.id, 'title': p.title, 'content': p.content} 
-                    for p in section.reading_passages]
-    }), 201
+            passage = ReadingPassage(title=passage_title, content=content, section=section)
+            db.session.add(passage)
+            db.session.flush() # Need passage.id before creating questions
+
+            passage_info = {'id': passage.id, 'title': passage.title, 'content': passage.content}
+            created_passages_info.append(passage_info)
+
+            for question_data in passage_data.get('questions', []):
+                print('Data before creating question: ', question_data) # Good debug print
+                # create_question now adds to session but doesn't commit
+                create_question(question_data, 'reading', reading_passage_id=passage.id)
+
+        # Single commit after all passages and questions are added successfully
+        db.session.commit()
+
+        return jsonify({
+            'id': section.id,
+            'title': section.title,
+            'passages': created_passages_info
+        }), 201
+
+    except Exception as e:
+        db.session.rollback() # Rollback on any error during processing
+        print(f"Error creating reading section: {e}") # Log the error
+        # Consider more specific error handling (ValueError, IntegrityError, etc.)
+        return jsonify({'error': f'An internal error occurred: {str(e)}'}), 500
 
 @app.route('/reading/<int:section_id>', methods=['GET'])
 def get_reading_section(section_id):
@@ -379,20 +440,37 @@ def get_reading_section(section_id):
     if not section:
         return jsonify({'error': 'Section not found'}), 404
 
-    passages = ReadingPassage.query.filter_by(section_id=section.id).all()
+    passages = ReadingPassage.query.filter_by(section_id=section.id).order_by(ReadingPassage.id).all() # below line is changed // Added order_by for consistency
     passages_data = []
     for passage in passages:
-        questions = Question.query.filter_by(reading_passage_id=passage.id).all()
+        questions = Question.query.filter_by(reading_passage_id=passage.id).order_by(Question.id).all() # below line is changed // Added order_by for consistency
         questions_data = []
         for q in questions:
-            options = Option.query.filter_by(question_id=q.id).all()
-            # options_data = [{'id': o.id, 'option_text': o.option_text} for o in options]
+            # Fetch options ordered by ID to ensure consistent A, B, C, D mapping
+            options = Option.query.filter_by(question_id=q.id).order_by(Option.id).all() # below line is changed // Added order_by for consistency
             options_data = [o.option_text for o in options]
-            questions_data.append({'id': q.id, 'type': q.type, 'prompt': q.prompt, 'options': options_data})
+
+            # Add the paragraph_index to the question data dictionary
+            question_dict = {
+                'id': q.id,
+                'type': q.type,
+                'prompt': q.prompt,
+                'options': options_data,
+                'paragraph_index': q.paragraph_index # below line is changed // Added paragraph_index field
+                # Note: JSON serialization handles None -> null automatically
+            }
+            
+            # Add summary_statement if it exists (for prose_summary)
+            # Assuming your Question model has a 'summary_statement' field/relationship
+            if hasattr(q, 'summary_statement') and q.summary_statement:
+                 question_dict['summary_statement'] = q.summary_statement
+            
+            questions_data.append(question_dict)
+
         passages_data.append({
             'id': passage.id,
             'title': passage.title,
-            'text': passage.content,
+            'content': passage.content,
             'questions': questions_data
         })
 
@@ -580,23 +658,30 @@ def create_listening_section():
     if not title:
         return jsonify({'error': 'Missing title'}), 400
 
-    audios_data = section_data.get('audios', [])
+    audios_data = section_data.get('audioItems', []) 
     if not audios_data:
-        return jsonify({'error': 'No audios provided'}), 400
+        return jsonify({'error': 'No audio items provided in sectionData'}), 400
 
     section = Section(section_type='listening', title=title)
     db.session.add(section)
 
-    for i, audio_data in enumerate(audios_data):
+    for audio_data in audios_data:
+        audio_item_id = audio_data.get('id') # Make sure frontend includes 'id' here
+        if not audio_item_id:
+            return jsonify({'error': f'Missing id for an audio item'}), 400
+        
         audio_title = audio_data.get('title')
         if not audio_title:
-            return jsonify({'error': f'Missing title for audio {i}'}), 400
+            return jsonify({'error': f'Missing title for audio {audio_item_id}'}), 400
+        
+        audio_file_key = f'audioItem_{audio_item_id}_audioFile'
+        image_file_key = f'audioItem_{audio_item_id}_imageFile'
 
-        audio_file = request.files.get(f'audioFiles[{i}]')
+        audio_file = request.files.get(audio_file_key)
         if not audio_file:
-            return jsonify({'error': f'Missing audio file for audio {i}'}), 400
+            return jsonify({'error': f'Missing audio file for audio item {audio_item_id} (expected key: {audio_file_key})'}), 400
 
-        photo_file = request.files.get(f'photoFiles[{i}]')
+        photo_file = request.files.get(image_file_key)
         audio_url = save_file(audio_file, 'listening_audios')
         photo_url = save_file(photo_file, 'listening_photos') if photo_file else None
 
@@ -604,9 +689,17 @@ def create_listening_section():
         db.session.add(audio)
         db.session.flush() # to get the id to use in create_question
         
-        for indx, question_data in enumerate(audio_data.get('questions', [])):
-            question_audio = request.files.get(f'questionSnippetFiles[{i}][{indx}]')
-            create_question(question_data, 'listening', listening_audio_id=audio.id, audio_file=question_audio)
+        
+        for question_data in audio_data.get('questions', []):
+            question_id = question_data.get('id') # Make sure frontend includes question 'id' here
+            if not question_id:
+                return jsonify({'error': f'Missing id for a question in audio item {audio_item_id}'}), 400
+                
+            snippet_file_key = f'question_{question_id}_snippetFile'
+            question_audio_file = request.files.get(snippet_file_key)
+
+            question_data_cleaned = {k: v for k, v in question_data.items() if k != 'id'}
+            create_question(question_data_cleaned, 'listening', listening_audio_id=audio.id, audio_file=question_audio_file)
 
     db.session.commit()
     
@@ -859,7 +952,7 @@ def submit_listening_answers(student_id, section_id):
 def create_speaking_section():
     if 'sectionData' not in request.form:
         return jsonify({'error': 'Missing sectionData'}), 400
-    
+
     try:
         section_data = json.loads(request.form['sectionData'])
     except json.JSONDecodeError:
@@ -869,50 +962,94 @@ def create_speaking_section():
     if not title:
         return jsonify({'error': 'Missing title'}), 400
 
-    tasks = {f'task{i}': section_data.get(f'task{i}') for i in range(1, 5)}
-    if not all(tasks.values()):
-        return jsonify({'error': 'Missing one or more tasks'}), 400
+    # --- MODIFICATION START ---
+    # Get the list of tasks from the 'tasks' key
+    tasks_list = section_data.get('tasks', [])
+
+    # Validate if we received exactly 4 tasks
+    if len(tasks_list) != 4:
+        return jsonify({'error': f'Expected 4 tasks, but received {len(tasks_list)}'}), 400
+
+    # Convert list to a dictionary keyed by taskNumber for easier access
+    # Also validate basic structure here
+    tasks_dict = {}
+    for task_data in tasks_list:
+        task_num = task_data.get('taskNumber')
+        if task_num is None or not isinstance(task_num, int) or not (1 <= task_num <= 4):
+             return jsonify({'error': f'Invalid or missing taskNumber in task data: {task_data}'}), 400
+        if 'prompt' not in task_data or not task_data.get('prompt','').strip():
+             return jsonify({'error': f'Missing or empty prompt for task {task_num}'}), 400
+        tasks_dict[task_num] = task_data
+
+    # Explicitly check if all task numbers 1-4 are present
+    if not all(num in tasks_dict for num in range(1, 5)):
+        return jsonify({'error': 'Missing data for one or more required tasks (1-4)'}), 400
+
+    # --- MODIFICATION END ---
 
     section = Section(section_type='speaking', title=title)
     db.session.add(section)
+    db.session.flush() # Flush to get section.id if needed by SpeakingTask relationships immediately (depends on model)
 
-    # Task 1: prompt only
-    db.session.add(SpeakingTask(section=section, task_number=1, prompt=tasks['task1']['prompt']))
+    try:
+        # Task 1: prompt only
+        task1_data = tasks_dict[1]
+        db.session.add(SpeakingTask(section=section, task_number=1, prompt=task1_data['prompt']))
 
-    # Task 2: passage, prompt, audio
-    task2_audio = request.files.get('task2Audio')
-    if not task2_audio:
-        return jsonify({'error': 'Missing task2Audio'}), 400
-    db.session.add(SpeakingTask(
-        section=section, task_number=2, passage=tasks['task2'].get('passage'), 
-        prompt=tasks['task2']['prompt'], audio_url=save_file(task2_audio, 'speaking_audios')
-    ))
+        # Task 2: passage, prompt, audio
+        task2_data = tasks_dict[2]
+        # --- Use correct file key ---
+        task2_audio = request.files.get('audio_task_2')
+        if not task2_audio:
+            # Rollback or cleanup might be needed if transaction fails midway
+            return jsonify({'error': 'Missing audio file for task 2 (expected key: audio_task_2)'}), 400
+        if 'passage' not in task2_data or not task2_data.get('passage','').strip():
+             return jsonify({'error': f'Missing or empty passage for task 2'}), 400
+        db.session.add(SpeakingTask(
+            section=section, task_number=2, passage=task2_data.get('passage'),
+            prompt=task2_data['prompt'], audio_url=save_file(task2_audio, 'speaking_audios')
+        ))
 
-    # Task 3: passage, prompt, audio
-    task3_audio = request.files.get('task3Audio')
-    if not task3_audio:
-        return jsonify({'error': 'Missing task3Audio'}), 400
-    db.session.add(SpeakingTask(
-        section=section, task_number=3, passage=tasks['task3'].get('passage'), 
-        prompt=tasks['task3']['prompt'], audio_url=save_file(task3_audio, 'speaking_audios')
-    ))
+        # Task 3: passage, prompt, audio
+        task3_data = tasks_dict[3]
+        # --- Use correct file key ---
+        task3_audio = request.files.get('audio_task_3')
+        if not task3_audio:
+            return jsonify({'error': 'Missing audio file for task 3 (expected key: audio_task_3)'}), 400
+        if 'passage' not in task3_data or not task3_data.get('passage','').strip():
+             return jsonify({'error': f'Missing or empty passage for task 3'}), 400
+        db.session.add(SpeakingTask(
+            section=section, task_number=3, passage=task3_data.get('passage'),
+            prompt=task3_data['prompt'], audio_url=save_file(task3_audio, 'speaking_audios')
+        ))
 
-    # Task 4: prompt, audio
-    task4_audio = request.files.get('task4Audio')
-    if not task4_audio:
-        return jsonify({'error': 'Missing task4Audio'}), 400
-    db.session.add(SpeakingTask(
-        section=section, task_number=4, prompt=tasks['task4']['prompt'], 
-        audio_url=save_file(task4_audio, 'speaking_audios')
-    ))
+        # Task 4: prompt, audio
+        task4_data = tasks_dict[4]
+        # --- Use correct file key ---
+        task4_audio = request.files.get('audio_task_4')
+        if not task4_audio:
+            return jsonify({'error': 'Missing audio file for task 4 (expected key: audio_task_4)'}), 400
+        db.session.add(SpeakingTask(
+            section=section, task_number=4, prompt=task4_data['prompt'],
+            audio_url=save_file(task4_audio, 'speaking_audios')
+        ))
 
-    db.session.commit()
-    
+        db.session.commit()
+
+    except Exception as e:
+        db.session.rollback() # Rollback on any error during processing
+        print(f"Error creating speaking section: {e}") # Log the error
+        return jsonify({'error': f'An internal error occurred: {str(e)}'}), 500
+
+
+    # Fetch the created tasks to return them (optional but good practice)
+    created_tasks = SpeakingTask.query.filter_by(section_id=section.id).order_by(SpeakingTask.task_number).all()
+
     return jsonify({
         'id': section.id,
         'title': section.title,
-        'tasks': [{'id': t.id, 'task_number': t.task_number, 'passage': t.passage, 
-                  'prompt': t.prompt, 'audio_url': t.audio_url} for t in section.speaking_tasks]
+        'tasks': [{'id': t.id, 'task_number': t.task_number, 'passage': t.passage,
+                  'prompt': t.prompt, 'audio_url': t.audio_url} for t in created_tasks]
     }), 201
 
 @app.route('/speaking/<int:section_id>', methods=['GET'])
@@ -1017,6 +1154,7 @@ def submit_speaking_answers(student_id, section_id):
             db.session.delete(prev_response)
 
         # Save the file and get its URL/path
+        file.filename = str(uuid.uuid4())
         audio_url = save_file(file, 'speaking_responses')
 
         # Store the response in the database
@@ -1173,7 +1311,7 @@ def submit_speaking_review(current_user_id, section_id):
 def create_writing_section():
     if 'sectionData' not in request.form:
         return jsonify({'error': 'Missing sectionData'}), 400
-    
+
     try:
         section_data = json.loads(request.form['sectionData'])
     except json.JSONDecodeError:
@@ -1183,35 +1321,64 @@ def create_writing_section():
     if not title:
         return jsonify({'error': 'Missing title'}), 400
 
-    tasks = {f'task{i}': section_data.get(f'task{i}') for i in range(1, 3)}
-    if not all(tasks.values()):
-        return jsonify({'error': 'Missing one or more tasks'}), 400
+    tasks_list = section_data.get('tasks', [])
+
+    if len(tasks_list) != 2:
+        return jsonify({'error': f'Expected 2 tasks, but received {len(tasks_list)}'}), 400
+
+    tasks_dict = {}
+    for task_data in tasks_list:
+        task_num = task_data.get('taskNumber')
+        if task_num is None or not isinstance(task_num, int) or not (1 <= task_num <= 2):
+             return jsonify({'error': f'Invalid or missing taskNumber in task data: {task_data}'}), 400
+        
+        if 'prompt' not in task_data or not task_data.get('prompt','').strip():
+             return jsonify({'error': f'Missing or empty prompt for task {task_num}'}), 400
+        
+        if 'passage' not in task_data or not task_data.get('passage','').strip():
+             return jsonify({'error': f'Missing or empty passage for task {task_num}'}), 400
+
+        tasks_dict[task_num] = task_data
+
+    if not all(num in tasks_dict for num in range(1, 3)):
+        return jsonify({'error': 'Missing data for one or more required tasks (1-2)'}), 400
 
     section = Section(section_type='writing', title=title)
     db.session.add(section)
+    db.session.flush() 
 
-    # Task 1: passage, prompt, audio
-    task1_audio = request.files.get('task1Audio')
-    if not task1_audio:
-        return jsonify({'error': 'Missing task1Audio'}), 400
-    db.session.add(WritingTask(
-        section=section, task_number=1, passage=tasks['task1']['passage'], 
-        prompt=tasks['task1']['prompt'], audio_url=save_file(task1_audio, 'writing_audios')
-    ))
+    try:
+        task1_data = tasks_dict[1]
 
-    # Task 2: passage, prompt
-    db.session.add(WritingTask(
-        section=section, task_number=2, passage=tasks['task2']['passage'], 
-        prompt=tasks['task2']['prompt']
-    ))
+        task1_audio = request.files.get('audio_task_1')
+        if not task1_audio:
+            return jsonify({'error': 'Missing audio file for task 1 (expected key: audio_task_1)'}), 400
 
-    db.session.commit()
-    
+        db.session.add(WritingTask(
+            section=section, task_number=1, passage=task1_data['passage'],
+            prompt=task1_data['prompt'], audio_url=save_file(task1_audio, 'writing_audios')
+        ))
+
+        task2_data = tasks_dict[2]
+        db.session.add(WritingTask(
+            section=section, task_number=2, passage=task2_data['passage'],
+            prompt=task2_data['prompt']
+        ))
+
+        db.session.commit()
+
+    except Exception as e:
+        db.session.rollback() 
+        print(f"Error creating writing section: {e}")
+        return jsonify({'error': f'An internal error occurred: {str(e)}'}), 500
+
+    created_tasks = WritingTask.query.filter_by(section_id=section.id).order_by(WritingTask.task_number).all()
+
     return jsonify({
         'id': section.id,
         'title': section.title,
-        'tasks': [{'id': t.id, 'task_number': t.task_number, 'passage': t.passage, 
-                  'prompt': t.prompt, 'audio_url': t.audio_url} for t in section.writing_tasks]
+        'tasks': [{'id': t.id, 'task_number': t.task_number, 'passage': t.passage,
+                  'prompt': t.prompt, 'audio_url': t.audio_url} for t in created_tasks]
     }), 201
 
 @app.route('/writing/<int:section_id>', methods=['GET'])
@@ -1440,6 +1607,772 @@ def submit_writing_review(current_user_id, section_id):
     except Exception as e:
         db.session.rollback()
         return jsonify({'error': f'Internal server error: {str(e)}'}), 500
+    
+# Review pages
+
+# === USER REVIEW ENDPOINTS ===
+
+@app.route('/review/summaries', methods=['GET'])
+@student_required
+def get_user_review_summaries(student_id):
+    """Fetches a summary of sections the user has completed."""
+    try:
+        summaries = []
+
+        # --- Query for SPEAKING sections completed by the user ---
+        speaking_sections = db.session.query(Section.id, Section.title)\
+            .join(SpeakingTask, Section.id == SpeakingTask.section_id)\
+            .join(SpeakingResponse, SpeakingTask.id == SpeakingResponse.task_id)\
+            .filter(SpeakingResponse.user_id == student_id)\
+            .distinct().all()
+        summaries.extend([{'sectionId': s.id, 'sectionTitle': s.title, 'sectionType': 'speaking'} for s in speaking_sections])
+
+        # --- Query for WRITING sections completed by the user ---
+        writing_sections = db.session.query(Section.id, Section.title)\
+            .join(WritingTask, Section.id == WritingTask.section_id)\
+            .join(WritingResponse, WritingTask.id == WritingResponse.task_id)\
+            .filter(WritingResponse.user_id == student_id)\
+            .distinct().all()
+        summaries.extend([{'sectionId': s.id, 'sectionTitle': s.title, 'sectionType': 'writing'} for s in writing_sections])
+
+        # --- Query for READING sections completed by the user ---
+        reading_sections = db.session.query(Section.id, Section.title)\
+            .join(ReadingPassage, Section.id == ReadingPassage.section_id)\
+            .join(Question, ReadingPassage.id == Question.reading_passage_id)\
+            .join(UserAnswer, Question.id == UserAnswer.question_id)\
+            .filter(UserAnswer.user_id == student_id)\
+            .filter(Section.section_type == 'reading')\
+            .distinct().all()
+        summaries.extend([{'sectionId': s.id, 'sectionTitle': s.title, 'sectionType': 'reading'} for s in reading_sections])
+
+        # --- Query for LISTENING sections completed by the user ---
+        listening_sections = db.session.query(Section.id, Section.title)\
+            .join(ListeningAudio, Section.id == ListeningAudio.section_id)\
+            .join(Question, ListeningAudio.id == Question.listening_audio_id)\
+            .join(UserAnswer, Question.id == UserAnswer.question_id)\
+            .filter(UserAnswer.user_id == student_id)\
+            .filter(Section.section_type == 'listening')\
+            .distinct().all()
+        summaries.extend([{'sectionId': s.id, 'sectionTitle': s.title, 'sectionType': 'listening'} for s in listening_sections])
+
+        # todo: optimize later
+        processed_summaries = []
+        processed_section_ids = set()
+
+        for s_type, sections_list in [('speaking', speaking_sections), ('writing', writing_sections), ('reading', reading_sections), ('listening', listening_sections)]:
+            for section_info in sections_list:
+                section_id = section_info.id
+                # Avoid processing the same section ID if it somehow appeared in multiple lists
+                if section_id in processed_section_ids:
+                    continue
+                processed_section_ids.add(section_id)
+
+                # --- Check feedback status ---
+                all_feedback_provided = False # Default to false
+                try:
+                    if s_type == 'speaking':
+                        # Check if ALL SpeakingResponses for this user/section have a corresponding Score
+                        response_count = db.session.query(db.func.count(SpeakingResponse.id)).join(SpeakingTask).filter(SpeakingTask.section_id == section_id, SpeakingResponse.user_id == student_id).scalar()
+                        score_count = db.session.query(db.func.count(Score.id)).join(SpeakingResponse).join(SpeakingTask).filter(SpeakingTask.section_id == section_id, SpeakingResponse.user_id == student_id, Score.response_type == 'speaking').scalar()
+                        all_feedback_provided = response_count > 0 and response_count == score_count
+
+                    elif s_type == 'writing':
+                        # Check if ALL WritingResponses for this user/section have a corresponding Score
+                        response_count = db.session.query(db.func.count(WritingResponse.id)).join(WritingTask).filter(WritingTask.section_id == section_id, WritingResponse.user_id == student_id).scalar()
+                        score_count = db.session.query(db.func.count(Score.id)).join(WritingResponse).join(WritingTask).filter(WritingTask.section_id == section_id, WritingResponse.user_id == student_id, Score.response_type == 'writing').scalar()
+                        all_feedback_provided = response_count > 0 and response_count == score_count
+
+                    elif s_type in ['reading', 'listening']:
+                        # Check if ALL UserAnswers for this user/section have a corresponding Score
+                        answer_count = db.session.query(db.func.count(UserAnswer.id)).join(Question).filter(Question.section_id == section_id, UserAnswer.user_id == student_id).scalar()
+                        score_count = db.session.query(db.func.count(Score.id)).join(UserAnswer).join(Question).filter(Question.section_id == section_id, UserAnswer.user_id == student_id, Score.response_type == s_type).scalar()
+                        all_feedback_provided = answer_count > 0 and answer_count == score_count
+                except Exception as check_e:
+                    print(f"Warning: Could not determine feedback status for section {section_id}: {check_e}")
+                    all_feedback_provided = False # Default to false on error
+
+
+                processed_summaries.append({
+                    'sectionId': section_id,
+                    'sectionTitle': section_info.title,
+                    'sectionType': s_type,
+                    'feedbackProvided': all_feedback_provided # <<< ADDED STATUS
+                    # 'completedAt': ... # Add completion date if needed
+                })
+
+
+        # return jsonify(list(unique_summaries)), 200
+        return jsonify(processed_summaries), 200
+
+        # return jsonify(summaries), 200
+
+    except Exception as e:
+        print(f"Error in /review/summaries: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': 'Failed to fetch review summaries'}), 500
+
+
+@app.route('/review/<sectionType>/<int:sectionId>', methods=['GET'])
+@student_required
+def get_user_section_review_details(student_id, sectionType, sectionId):
+    """Fetches the user's responses, scores, and feedback for a specific section."""
+    try:
+        section = db.session.query(Section).filter_by(id=sectionId, section_type=sectionType).first()
+        if not section:
+            return jsonify({'error': 'Section not found'}), 404
+
+        results = {'sectionId': section.id, 'sectionTitle': section.title, 'sectionType': section.section_type, 'tasks': []}
+
+        if sectionType == 'speaking':
+            tasks_query = db.session.query(SpeakingTask)\
+                .filter(SpeakingTask.section_id == sectionId)\
+                .options(
+                    # Load SpeakingResponses related to the SpeakingTask
+                    joinedload(SpeakingTask.responses)
+                        # THEN, from the loaded SpeakingResponse, load its 'scores' relationship
+                        .joinedload(SpeakingResponse.scores)
+                        # THEN, from the loaded Score, load its 'scorer' relationship
+                        .joinedload(Score.scorer)
+                )\
+                .order_by(SpeakingTask.task_number)
+
+            tasks = tasks_query.all()
+
+            # --- The rest of the processing logic ---
+            # (This part should be correct if copied from the fixed writing version)
+            results = {'sectionId': sectionId, 'sectionTitle': '...', 'sectionType': 'speaking', 'tasks': []}
+            section = db.session.query(Section.title).filter_by(id=sectionId).first()
+            if section: results['sectionTitle'] = section.title
+            else: return jsonify({'error': 'Section not found'}), 404
+
+            for task in tasks:
+                # Filter in Python to find the specific student's response
+                response = next((r for r in task.responses if r.user_id == student_id), None)
+                score_data = None
+                if response and response.scores:
+                    score_rec = response.scores[0] if response.scores else None
+                    if score_rec:
+                        score_data = {
+                            'score': float(score_rec.score) if score_rec.score is not None else None,
+                            'feedback': score_rec.feedback,
+                            'scorer': score_rec.scorer.username if score_rec.scorer else None
+                        }
+
+                results['tasks'].append({
+                    'taskId': task.id,
+                    'taskNumber': task.task_number,
+                    'prompt': task.prompt,
+                    'passage': task.passage,
+                    'taskAudioUrl': task.audio_url,
+                    'response': {
+                        'responseId': response.id if response else None,
+                        'audioUrl': response.audio_url if response else None,
+                    } if response else None,
+                    'score': score_data
+                })
+
+        elif sectionType == 'writing':
+            tasks_query = db.session.query(WritingTask)\
+                .filter(WritingTask.section_id == sectionId)\
+                .options(
+                    # Load ALL responses for the task first
+                    joinedload(WritingTask.responses)
+                        # THEN, for those responses, load their scores
+                        .joinedload(WritingResponse.scores)
+                        # THEN, for those scores, load the scorer
+                        .joinedload(Score.scorer)
+                    # REMOVED: .and_(WritingResponse.user_id == student_id) <<< Make sure this line is gone!
+                )\
+                .order_by(WritingTask.task_number)
+
+            tasks = tasks_query.all()
+
+            results = {'sectionId': sectionId, 'sectionTitle': '...', 'sectionType': 'writing', 'tasks': []}
+
+            section = db.session.query(Section.title).filter_by(id=sectionId).first()
+            if section: results['sectionTitle'] = section.title
+            else: return jsonify({'error': 'Section not found'}), 404
+
+
+            for task in tasks:
+                # --- Filter in Python: Find the response for the specific student ---
+                response = next((r for r in task.responses if r.user_id == student_id), None)
+                # --- End Python Filter ---
+
+                score_data = None
+                if response and response.scores:
+                    score_rec = response.scores[0] if response.scores else None
+                    if score_rec:
+                        score_data = {
+                            'score': float(score_rec.score) if score_rec.score is not None else None,
+                            'feedback': score_rec.feedback,
+                            'scorer': score_rec.scorer.username if score_rec.scorer else None
+                        }
+
+                results['tasks'].append({
+                    'taskId': task.id,
+                    'taskNumber': task.task_number,
+                    'prompt': task.prompt,
+                    'passage': task.passage,
+                    'taskAudioUrl': task.audio_url,
+                    'response': {
+                        'responseId': response.id if response else None,
+                        'responseText': response.response_text if response else None,
+                        'wordCount': response.word_count if response else None,
+                    } if response else None,
+                    'score': score_data
+                })
+
+
+        elif sectionType in ['reading', 'listening']:
+            # Determine the correct intermediate model and join conditions
+            if sectionType == 'reading':
+                IntermediateModel = ReadingPassage
+                intermediate_fk_on_question = Question.reading_passage_id
+                section_fk_on_intermediate = ReadingPassage.section_id
+            else: # listening
+                IntermediateModel = ListeningAudio
+                intermediate_fk_on_question = Question.listening_audio_id
+                section_fk_on_intermediate = ListeningAudio.section_id
+
+            # Fetch UserAnswers by joining through the correct path AND filtering correctly
+            answers_query = db.session.query(UserAnswer)\
+                .join(Question, UserAnswer.question_id == Question.id)\
+                .join(IntermediateModel, intermediate_fk_on_question == IntermediateModel.id) \
+                .filter(section_fk_on_intermediate == sectionId) \
+                .filter(UserAnswer.user_id == student_id) \
+                .options( # Eager load everything needed
+                    joinedload(UserAnswer.user), # Though filtered, good practice
+                    joinedload(UserAnswer.question).options(
+                        # Load question context
+                        joinedload(Question.options), # Load all options for the question
+                        joinedload(Question.correct_answers).joinedload(CorrectAnswer.option), # Load correct options
+                        joinedload(Question.correct_answers).joinedload(CorrectAnswer.table_row), # Load correct table rows
+                        joinedload(Question.correct_answers).joinedload(CorrectAnswer.table_column), # Load correct table columns
+                        joinedload(Question.user_answers.and_(UserAnswer.user_id == student_id)).joinedload(UserAnswer.option), # Load user's selected option
+                        joinedload(Question.user_answers.and_(UserAnswer.user_id == student_id)).joinedload(UserAnswer.table_row), # Load user's selected row
+                        joinedload(Question.user_answers.and_(UserAnswer.user_id == student_id)).joinedload(UserAnswer.table_column) # Load user's selected col
+                    ),
+                    # Load user selection details
+                    joinedload(UserAnswer.option),
+                    joinedload(UserAnswer.table_row),
+                    joinedload(UserAnswer.table_column),
+                    # Load scores
+                    joinedload(UserAnswer.scores).joinedload(Score.scorer)
+                )\
+                .order_by(Question.id) # Order by Question ID for consistency
+
+            user_answers = answers_query.all()
+            user_responses_map = {}
+
+            for ua in user_answers: # 'ua' is the UserAnswer object for the current student/question
+                # Ensure the student exists in the map
+                if ua.user_id not in user_responses_map:
+                    user_responses_map[ua.user_id] = {
+                        'student': {'id': ua.user.id, 'name': ua.user.username},
+                        'responses': []
+                    }
+
+                # Determine user's answer representation *directly from ua*
+                user_ans_repr = None
+                if ua.option: # Check if the UserAnswer links to an Option
+                    user_ans_repr = ua.option.id
+                elif ua.table_row and ua.table_column: # Check if it links to table row/col
+                    user_ans_repr = {'rowId': ua.table_row_id, 'colId': ua.table_column_id}
+                # Add elif for other potential answer storage methods if needed
+
+                # Access the loaded score directly from the UserAnswer's 'scores' relationship
+                score_rec = ua.scores[0] if ua.scores else None
+                score_data = {
+                    'score': float(score_rec.score) if score_rec and score_rec.score is not None else None,
+                    'feedback': score_rec.feedback if score_rec else None,
+                    'hasFeedback': bool(score_rec) # This status is needed for admin view, maybe not user view
+                }
+
+                # Get correct answer (you might need this logic for user view too)
+                correct_ans_repr = []
+                if ua.question.type in ['multiple_to_single', 'multiple_to_multiple', 'audio']:
+                    correct_ans_repr = [ca.option.id for ca in ua.question.correct_answers if ca.option]
+                elif ua.question.type == 'table':
+                    correct_ans_repr = [{'rowId': ca.table_row_id, 'colId': ca.table_column_id} for ca in ua.question.correct_answers if ca.table_row and ca.table_column]
+
+                # Determine if user's answer was correct
+                is_correct = False
+                if ua.question.type in ['multiple_to_single', 'audio']:
+                    is_correct = user_ans_repr is not None and correct_ans_repr and user_ans_repr == correct_ans_repr[0]
+                elif ua.question.type == 'multiple_to_multiple':
+                    # We need all user answers for *this specific question* to compare sets
+                    # This might require a slightly different query structure if not already loaded correctly
+                    # For simplicity, let's assume correctness check might be complex here or done differently
+                    pass # Complex comparison needed
+                elif ua.question.type == 'table':
+                    # Complex comparison needed
+                    pass
+
+
+                # Append the formatted response details
+                user_responses_map[ua.user_id]['responses'].append({
+                    'responseId': ua.id, # This is UserAnswer.id - Use as 'response.responseId'
+                    'taskId': ua.question.id,
+                    'taskNumber': ua.question.id, # Or index needed?
+                    'prompt': ua.question.prompt,
+                    # 'responseType': sectionType, # Not usually needed in UserTaskReview
+                    'response': { # Nest response specific details
+                        'responseId': ua.id,
+                        'userSelection': user_ans_repr,
+                        'isCorrect': is_correct
+                    },
+                    # Context
+                    'options': [{'id': o.id, 'text': o.option_text} for o in ua.question.options],
+                    'rows': [{'id': r.id, 'label': r.row_label} for r in getattr(ua.question, 'table_rows', [])],
+                    'columns': [{'id': c.id, 'label': c.column_label} for c in getattr(ua.question, 'table_columns', [])],
+                    'correctAnswer': correct_ans_repr,
+                    # Score/Feedback (should match UserTaskReview.score structure)
+                    'score': { # Nest score details
+                        'score': score_data['score'],
+                        'feedback': score_data['feedback'],
+                        'scorer': score_rec.scorer.username if score_rec and score_rec.scorer else None
+                    } if score_rec else None # Send null if no score record
+                })
+
+                submissions_or_tasks_list = list(user_responses_map.values())
+
+                # Decide final return structure. The endpoint is for ONE user,
+                # so 'submissions_or_tasks_list' should only have one element.
+                if len(submissions_or_tasks_list) > 1:
+                    print(f"Warning: Found review data for more than one user ({len(submissions_or_tasks_list)}) for student_id {student_id}")
+
+                final_tasks = submissions_or_tasks_list[0]['responses'] if submissions_or_tasks_list else []
+
+                # Structure the final JSON to match UserSectionReviewDetail
+                results['tasks'] = final_tasks # Assign the list of formatted tasks
+
+        return jsonify(results), 200
+
+    except Exception as e:
+        print(f"Error in /review/{sectionType}/{sectionId}: {e}")
+        import traceback
+        traceback.print_exc() # Print full traceback for debugging
+        return jsonify({'error': 'Failed to fetch review details'}), 500
+
+
+# === ADMIN REVIEW ENDPOINTS ===
+
+@app.route('/admin/review/summaries', methods=['GET'])
+@admin_required_with_id
+def get_admin_review_summaries(admin_id):
+    """Fetches summaries of sections with responses for admin review."""
+    sectionType = request.args.get('type', 'speaking') # Default to speaking or get from query param
+    try:
+        query = db.session.query(
+                Section.id.label('sectionId'),
+                Section.title.label('sectionTitle'),
+                db.func.count(db.distinct(User.id)).label('studentCount') # Count distinct users
+            ).select_from(Section) 
+
+        if sectionType == 'speaking':
+            query = query.join(SpeakingTask, Section.id == SpeakingTask.section_id)\
+                         .join(SpeakingResponse, SpeakingTask.id == SpeakingResponse.task_id)\
+                         .join(User, SpeakingResponse.user_id == User.id) # <<< Join User via Response
+        elif sectionType == 'writing':
+            query = query.join(WritingTask, Section.id == WritingTask.section_id)\
+                         .join(WritingResponse, WritingTask.id == WritingResponse.task_id)\
+                         .join(User, WritingResponse.user_id == User.id) # <<< Join User via Response
+        elif sectionType == 'reading':
+            query = query.join(ReadingPassage, Section.id == ReadingPassage.section_id)\
+                        .join(Question, ReadingPassage.id == Question.reading_passage_id)\
+                        .join(UserAnswer, Question.id == UserAnswer.question_id)\
+                        .join(User, UserAnswer.user_id == User.id)
+        elif sectionType == 'listening':
+            query = query.join(ListeningAudio, Section.id == ListeningAudio.section_id)\
+                        .join(Question, ListeningAudio.id == Question.listening_audio_id)\
+                        .join(UserAnswer, Question.id == UserAnswer.question_id)\
+                        .join(User, UserAnswer.user_id == User.id)
+        else: 
+            return jsonify({'error': 'Invalid section type'}), 400
+
+        # Add filters and grouping AFTER establishing the joins
+        query = query.filter(Section.section_type == sectionType)\
+                    .group_by(Section.id, Section.title) # Group by the Section columns
+
+        summaries_raw = query.all()
+
+        # summaries_raw = query.filter(Section.section_type == sectionType).group_by(Section.id, Section.title).all()
+
+        # Convert Row objects to dictionaries
+        summaries = [row._asdict() for row in summaries_raw]
+
+        for summary in summaries:
+            summary['sectionType'] = sectionType
+
+        return jsonify(summaries), 200
+    except Exception as e:
+        db.session.rollback() 
+        print(f"Error in /admin/review/summaries: {e}")
+        import traceback
+        traceback.print_exc() # Print full traceback for better debugging
+        return jsonify({'error': f'Failed to fetch admin review summaries for {sectionType}'}), 500
+
+
+@app.route('/admin/review/<sectionType>/<int:sectionId>', methods=['GET'])
+@admin_required # Assuming admin_required provides admin_id implicitly or via g.user
+def get_admin_section_review_details(sectionType, sectionId): # Removed admin_id if not needed directly
+    """Fetches all student responses/answers for a specific section for admin review."""
+    try:
+        section = db.session.query(Section).filter_by(id=sectionId, section_type=sectionType).first()
+        if not section:
+            return jsonify({'error': 'Section not found'}), 404
+
+        submissions = []
+        user_responses_map = {} # Temp map {user_id: {student: {...}, responses: [...]}}
+
+        if sectionType == 'speaking':
+            # Fetch SpeakingResponses and eagerly load related data including Scores
+            responses_query = db.session.query(SpeakingResponse)\
+                .join(SpeakingTask, SpeakingResponse.task_id == SpeakingTask.id)\
+                .filter(SpeakingTask.section_id == sectionId)\
+                .options(
+                    joinedload(SpeakingResponse.user),
+                    joinedload(SpeakingResponse.task),
+                    joinedload(SpeakingResponse.scores).joinedload(Score.scorer) # Eager load scores and scorer
+                )\
+                .order_by(SpeakingResponse.user_id, SpeakingTask.task_number)
+
+            responses = responses_query.all()
+
+            for resp in responses:
+                if resp.user_id not in user_responses_map:
+                     user_responses_map[resp.user_id] = {
+                         'student': {'id': resp.user.id, 'name': resp.user.username},
+                         'responses': []
+                     }
+                # Access the loaded score (should be 0 or 1 score object)
+                score_rec = resp.scores[0] if resp.scores else None
+                score_data = {
+                     'score': float(score_rec.score) if score_rec and score_rec.score is not None else None,
+                     'feedback': score_rec.feedback if score_rec else None,
+                     'hasFeedback': bool(score_rec)
+                 }
+
+                user_responses_map[resp.user_id]['responses'].append({
+                    'responseId': resp.id, 'taskId': resp.task_id, 'taskNumber': resp.task.task_number,
+                    'taskPrompt': resp.task.prompt, 'responseType': 'speaking', 'audioUrl': resp.audio_url,
+                    **score_data
+                })
+
+        elif sectionType == 'writing':
+            # Fetch WritingResponses similarly
+            responses_query = db.session.query(WritingResponse)\
+                .join(WritingTask, WritingResponse.task_id == WritingTask.id)\
+                .filter(WritingTask.section_id == sectionId)\
+                .options(
+                    joinedload(WritingResponse.user),
+                    joinedload(WritingResponse.task),
+                    joinedload(WritingResponse.scores).joinedload(Score.scorer)
+                )\
+                .order_by(WritingResponse.user_id, WritingTask.task_number)
+
+            responses = responses_query.all()
+            # Process writing responses (similar logic to speaking)
+            for resp in responses:
+                 if resp.user_id not in user_responses_map:
+                     user_responses_map[resp.user_id] = {
+                         'student': {'id': resp.user.id, 'name': resp.user.username},
+                         'responses': []
+                     }
+                 score_rec = resp.scores[0] if resp.scores else None
+                 score_data = { 'score': float(score_rec.score) if score_rec and score_rec.score is not None else None, 'feedback': score_rec.feedback if score_rec else None, 'hasFeedback': bool(score_rec)}
+                 user_responses_map[resp.user_id]['responses'].append({
+                    'responseId': resp.id, 'taskId': resp.task_id, 'taskNumber': resp.task.task_number,
+                    'taskPrompt': resp.task.prompt, 'responseType': 'writing', 'responseText': resp.response_text, 'wordCount': resp.word_count,
+                    **score_data
+                 })
+
+
+        elif sectionType in ['reading', 'listening']:
+            # Determine the correct intermediate model and join condition based on type
+            if sectionType == 'reading':
+                IntermediateModel = ReadingPassage
+                intermediate_fk_on_question = Question.reading_passage_id
+                section_fk_on_intermediate = ReadingPassage.section_id
+            else: # listening
+                IntermediateModel = ListeningAudio
+                intermediate_fk_on_question = Question.listening_audio_id
+                section_fk_on_intermediate = ListeningAudio.section_id
+
+            # Fetch UserAnswers by joining through the correct path
+            answers_query = db.session.query(UserAnswer)\
+                .join(Question, UserAnswer.question_id == Question.id)\
+                .join(IntermediateModel, intermediate_fk_on_question == IntermediateModel.id) \
+                .filter(section_fk_on_intermediate == sectionId) \
+                .options( # Eager load everything needed
+                    joinedload(UserAnswer.user),
+                    joinedload(UserAnswer.question).options(
+                        joinedload(Question.options),
+                        joinedload(Question.table_rows),
+                        joinedload(Question.table_columns),
+                        joinedload(Question.correct_answers).joinedload(CorrectAnswer.option),
+                        joinedload(Question.correct_answers).joinedload(CorrectAnswer.table_row),
+                        joinedload(Question.correct_answers).joinedload(CorrectAnswer.table_column),
+                    ),
+                    joinedload(UserAnswer.option),
+                    joinedload(UserAnswer.table_row),
+                    joinedload(UserAnswer.table_column),
+                    joinedload(UserAnswer.scores).joinedload(Score.scorer) # Load score via relationship
+                )\
+                .order_by(UserAnswer.user_id, Question.id) # Order is important for grouping
+
+            user_answers = answers_query.all()
+
+            # --- The rest of the processing logic remains the same ---
+            # It correctly groups by user_id and processes each 'ua' in user_answers
+            for ua in user_answers:
+                if ua.user_id not in user_responses_map:
+                    user_responses_map[ua.user_id] = {
+                        'student': {'id': ua.user.id, 'name': ua.user.username},
+                        'responses': []
+                    }
+
+                # Determine user's answer representation (logic as before)
+                user_ans_repr = None
+                if ua.question.type in ['multiple_to_single', 'multiple_to_multiple', 'audio'] and ua.option:
+                    user_ans_repr = ua.option.id
+                elif ua.question.type == 'table' and ua.table_row and ua.table_column:
+                    user_ans_repr = {'rowId': ua.table_row_id, 'colId': ua.table_column_id}
+
+                # Access the loaded score
+                score_rec = ua.scores[0] if ua.scores else None
+                score_data = {
+                    'score': float(score_rec.score) if score_rec and score_rec.score is not None else None,
+                    'feedback': score_rec.feedback if score_rec else None,
+                    'hasFeedback': bool(score_rec)
+                }
+
+                user_responses_map[ua.user_id]['responses'].append({
+                    'responseId': ua.id, # UserAnswer.id
+                    'taskId': ua.question.id,
+                    'taskNumber': ua.question.id, # Or index
+                    'taskPrompt': ua.question.prompt,
+                    'responseType': sectionType,
+                    'userSelection': user_ans_repr,
+                    'options': [{'id': o.id, 'text': o.option_text} for o in ua.question.options],
+                    'rows': [{'id': r.id, 'label': r.row_label} for r in getattr(ua.question, 'table_rows', [])],
+                    'columns': [{'id': c.id, 'label': c.column_label} for c in getattr(ua.question, 'table_columns', [])],
+                    **score_data
+                })
+
+        # Convert map to list
+        submissions = list(user_responses_map.values())
+
+        return jsonify({
+            'sectionId': section.id,
+            'sectionTitle': section.title,
+            'sectionType': section.section_type,
+            'submissions': submissions
+        }), 200
+
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error fetching admin details for {sectionType}/{sectionId}: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': 'Failed to fetch admin review details'}), 500
+
+
+# --- Endpoint to GET details for the feedback form (Handles all types) ---
+@app.route('/admin/feedback/<responseType>/<int:responseId>', methods=['GET'])
+@admin_required # Use appropriate decorator
+def get_feedback_target_details(responseType, responseId): # Removed admin_id if not needed
+    """Fetches details of a specific response/answer for the feedback form."""
+    try:
+        response_data = None
+        if responseType == 'speaking':
+            resp = db.session.query(SpeakingResponse)\
+                .options(joinedload(SpeakingResponse.user),
+                         joinedload(SpeakingResponse.task),
+                         joinedload(SpeakingResponse.scores).joinedload(Score.scorer))\
+                .filter(SpeakingResponse.id == responseId).first()
+            if not resp: return jsonify({'error': 'Speaking response not found'}), 404
+            score_rec = resp.scores[0] if resp.scores else None
+            response_data = { # Structure matches FeedbackTargetDetails type
+                'responseId': resp.id, 'responseType': 'speaking',
+                'student': {'id': resp.user.id, 'name': resp.user.username},
+                'task': {'id': resp.task.id, 'number': resp.task.task_number, 'prompt': resp.task.prompt},
+                'audioUrl': resp.audio_url,
+                'score': float(score_rec.score) if score_rec and score_rec.score is not None else None,
+                'feedback': score_rec.feedback if score_rec else None # Send null or ""? "" is better for form
+            }
+        elif responseType == 'writing':
+            resp = db.session.query(WritingResponse)\
+                .options(joinedload(WritingResponse.user),
+                         joinedload(WritingResponse.task),
+                         joinedload(WritingResponse.scores).joinedload(Score.scorer))\
+                .filter(WritingResponse.id == responseId).first()
+            if not resp: return jsonify({'error': 'Writing response not found'}), 404
+            score_rec = resp.scores[0] if resp.scores else None
+            response_data = {
+                'responseId': resp.id, 'responseType': 'writing',
+                'student': {'id': resp.user.id, 'name': resp.user.username},
+                'task': {'id': resp.task.id, 'number': resp.task.task_number, 'prompt': resp.task.prompt},
+                'responseText': resp.response_text, 'wordCount': resp.word_count,
+                'score': float(score_rec.score) if score_rec and score_rec.score is not None else None,
+                'feedback': score_rec.feedback if score_rec else None
+            }
+        elif responseType in ['reading', 'listening']:
+             resp = db.session.query(UserAnswer)\
+                .options(
+                    joinedload(UserAnswer.user),
+                    joinedload(UserAnswer.question).options(
+                        joinedload(Question.options), # Load all needed context
+                        joinedload(Question.table_rows),
+                        joinedload(Question.table_columns),
+                        joinedload(Question.correct_answers).joinedload(CorrectAnswer.option),
+                        joinedload(Question.correct_answers).joinedload(CorrectAnswer.table_row),
+                        joinedload(Question.correct_answers).joinedload(CorrectAnswer.table_column),
+                     ),
+                    joinedload(UserAnswer.option),
+                    joinedload(UserAnswer.table_row),
+                    joinedload(UserAnswer.table_column),
+                    joinedload(UserAnswer.scores).joinedload(Score.scorer) # Load score via relationship
+                    )\
+                .filter(UserAnswer.id == responseId).first()
+             if not resp: return jsonify({'error': f'{responseType.capitalize()} answer not found'}), 404
+
+             # Determine user selection and correct answer representations
+             user_ans_repr = None
+             # ... (logic to determine user_ans_repr) ...
+             if resp.question.type in ['multiple_to_single', 'multiple_to_multiple', 'audio'] and resp.option:
+                 user_ans_repr = resp.option.id
+             elif resp.question.type == 'table' and resp.table_row and resp.table_column:
+                 user_ans_repr = {'rowId': resp.table_row_id, 'colId': resp.table_column_id}
+             # Add logic for other types
+
+             correct_ans_repr = []
+             # ... (logic to determine correct_ans_repr from resp.question.correct_answers) ...
+             if resp.question.type in ['multiple_to_single', 'multiple_to_multiple', 'audio']:
+                 correct_ans_repr = [ca.option.id for ca in resp.question.correct_answers if ca.option]
+             elif resp.question.type == 'table':
+                 correct_ans_repr = [{'rowId': ca.table_row_id, 'colId': ca.table_column_id} for ca in resp.question.correct_answers if ca.table_row and ca.table_column]
+
+
+             score_rec = resp.scores[0] if resp.scores else None
+             response_data = {
+                 'responseId': resp.id, 'responseType': responseType,
+                 'student': {'id': resp.user.id, 'name': resp.user.username},
+                 'task': {'id': resp.question.id, 'number': resp.question.id, 'prompt': resp.question.prompt},
+                 'userSelection': user_ans_repr,
+                 'options': [{'id': o.id, 'text': o.option_text} for o in resp.question.options],
+                 'rows': [{'id': r.id, 'label': r.row_label} for r in getattr(resp.question, 'table_rows', [])],
+                 'columns': [{'id': c.id, 'label': c.column_label} for c in getattr(resp.question, 'table_columns', [])],
+                 'correctAnswer': correct_ans_repr, # Include correct answer for context
+                 'score': float(score_rec.score) if score_rec and score_rec.score is not None else None,
+                 'feedback': score_rec.feedback if score_rec else None
+             }
+        else:
+            return jsonify({'error': 'Invalid response type'}), 400
+
+        # Ensure feedback is "" if null for form pre-filling
+        if response_data and response_data.get('feedback') is None:
+            response_data['feedback'] = ""
+
+        return jsonify(response_data), 200
+    except Exception as e:
+        print(f"Error getting feedback target details: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': 'Failed to fetch response details'}), 500
+
+
+# --- Endpoint to POST feedback (Handles all types) ---
+@app.route('/admin/feedback/<responseType>/<int:responseId>', methods=['POST'])
+@admin_required_with_id # Use appropriate decorator that provides admin_id (e.g., via g.user)
+def submit_admin_feedback(admin_id, responseType, responseId): # Removed admin_id if provided by decorator context
+    """Submits score and feedback for a specific response or answer."""
+    # Get admin_id from context (adjust based on your decorator)
+    # Example: admin_id = g.user.id
+    if not admin_id:
+         return jsonify({'error': 'Admin user context not found'}), 500 # Or 401/403
+
+    data = request.get_json()
+    if not data: return jsonify({'error': 'Missing JSON data'}), 400
+
+    # Use .get with default None for score, allow score to be omitted or explicitly null
+    score_value = data.get('score')
+    feedback_text = data.get('feedback', "").strip() # Default to "", trim whitespace
+
+    # Basic validation (more specific validation based on type might be needed)
+    if score_value is not None:
+        try:
+            # Validate score range based on type
+            score_value = float(score_value)
+            max_score = 5.0 if responseType in ['speaking', 'writing'] else 1.0 # Example max scores
+            if not (0 <= score_value <= max_score):
+                 raise ValueError(f"Score must be between 0 and {max_score}")
+        except (ValueError, TypeError):
+             return jsonify({'error': f'Invalid score value: {score_value}'}), 400
+
+
+    try:
+        target_id_column = None
+        if responseType in ['speaking', 'writing']:
+            target_id_column = Score.response_id
+            # Verify original response exists
+            model = SpeakingResponse if responseType == 'speaking' else WritingResponse
+            if not db.session.query(model.id).filter_by(id=responseId).first():
+                return jsonify({'error': f'Original {responseType} response not found'}), 404
+
+        elif responseType in ['reading', 'listening']:
+            target_id_column = Score.user_answer_id
+            # Verify original answer exists
+            if not db.session.query(UserAnswer.id).filter_by(id=responseId).first():
+                 return jsonify({'error': f'Original {responseType} answer not found'}), 404
+        else:
+             return jsonify({'error': 'Invalid response type'}), 400
+
+        # Find existing Score record or create new
+        score_rec = db.session.query(Score).filter(
+            target_id_column == responseId,
+            Score.response_type == responseType # Always filter by type too
+        ).first()
+
+        if score_rec:
+            # Update existing score
+            score_rec.score = score_value
+            score_rec.feedback = feedback_text if feedback_text else None # Store null if empty
+            score_rec.scored_by = admin_id
+            # updated_at will auto-update
+        else:
+            # Create new score record
+            new_score = Score(
+                response_type=responseType,
+                score=score_value,
+                feedback=feedback_text if feedback_text else None,
+                scored_by=admin_id
+            )
+            # Set the correct linking ID
+            if responseType in ['speaking', 'writing']:
+                new_score.response_id = responseId
+            else: # Reading or Listening
+                new_score.user_answer_id = responseId
+
+            db.session.add(new_score)
+            # If linking UserAnswer via association table:
+            if responseType in ['reading', 'listening']:
+                ua = db.session.query(UserAnswer).get(responseId)
+                if ua:
+                    ua.scores.append(new_score) # Append to establish secondary relationship
+
+        db.session.commit()
+        return jsonify({'message': 'Feedback submitted successfully'}), 200
+
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error submitting feedback: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'error': 'Failed to submit feedback'}), 500
+
 
 # Create database tables
 with app.app_context():
