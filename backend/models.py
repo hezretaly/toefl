@@ -219,7 +219,7 @@ class Score(db.Model):
     # Add constraints to ensure only one type of response link is used
     __table_args__ = (
         db.CheckConstraint(
-            'num_nonnulls(response_id, user_answer_id) = 1',
+            '((response_id IS NOT NULL AND user_answer_id IS NULL) OR (response_id IS NULL AND user_answer_id IS NOT NULL))',
             name='score_response_link_check'
         ),
          db.CheckConstraint(
