@@ -6,6 +6,7 @@ type User = {
   id: number;
   username: string;
   email: string;
+  role?: string;
 };
 
 interface AuthContextType {
@@ -27,15 +28,32 @@ export const AuthProvider = ({ children }: { children: ReactNode }) => {
 
   // Check for token on initial load
   useEffect(() => {
-    const storedToken = localStorage.getItem('token');
-    const storedUser = localStorage.getItem('user');
-    
-    if (storedToken && storedUser) {
-      setToken(storedToken);
-      setUser(JSON.parse(storedUser));
+    try {
+      const storedToken = localStorage.getItem('token');
+      const storedUser = localStorage.getItem('user');
+      
+      if (storedToken && storedUser) {
+        setToken(storedToken);
+        try {
+          const parsedUser = JSON.parse(storedUser);
+          // Optional: You could add validation here to ensure parsedUser matches User type
+          setUser(parsedUser);
+        } catch (error) {
+          console.error("Failed to parse user from localStorage:", error);
+          // If parsing fails, clear the potentially corrupted data
+          localStorage.removeItem('user');
+          localStorage.removeItem('token'); // Also remove token if user data is bad
+          setUser(null);
+          setToken(null);
+        }
+      }
+    } catch (error) {
+      // Catch potential errors accessing localStorage itself (less common)
+      console.error("Error accessing localStorage:", error);
+    } finally { // <-- Use finally to ensure isLoading is set to false
+        setIsLoading(false);
     }
     
-    setIsLoading(false);
   }, []);
 
   const login = async (email: string, password: string) => {

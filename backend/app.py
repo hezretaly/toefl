@@ -317,7 +317,8 @@ def register():
             'user': {
                 'id': user.id,
                 'username': user.username,
-                'email': user.email
+                'email': user.email,
+                'role': user.role
             }
         }), 201
 
@@ -345,7 +346,8 @@ def login():
             'user': {
                 'id': user.id,
                 'username': user.username,
-                'email': user.email
+                'email': user.email,
+                'role': user.role
             }
         }), 200
     else:

@@ -1,7 +1,7 @@
 
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { BookOpen, Headphones, Mic, FileEdit, BarChart } from 'lucide-react';
+import { BookOpen, Headphones, Mic, FileEdit, BarChart, PlusCircle } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { toast } from 'sonner';
@@ -27,7 +27,7 @@ const Dashboard = () => {
   const [writingSections, setWritingSections] = useState<SectionData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   
-  const { token, isAuthenticated } = useAuth();
+  const { token, user, isAuthenticated } = useAuth();
   const navigate = useNavigate();
   
   useEffect(() => {
@@ -63,6 +63,18 @@ const Dashboard = () => {
   
   const handleStartTest = (type: string, sectionId: number) => {
     navigate(`/${type}/${sectionId}`);
+  };
+
+  const handleProgressReportClick = () => {
+    // Check if user data is available and the role is 'admin'
+    if (user && user.role === 'admin') {
+      navigate('/create-section'); // Navigate admin to create section page
+    } else {
+      // Handle non-admin users (optional)
+      // For example, navigate them to a different page or show a message
+      toast.info("Progress report view is not available yet.");
+      // navigate('/my-progress'); // Example: navigate to a general user progress page
+    }
   };
   
   const renderSections = (
@@ -142,14 +154,27 @@ const Dashboard = () => {
             <div>
               <h1 className="text-3xl font-bold mb-2">Dashboard</h1>
               <p className="text-gray-600">
-                Welcome to your TOEFL Test Mastery dashboard. Select a section to start practicing.
+                Welcome{user ? `, ${user.username}` : ''}! Select a section to start practicing.
               </p>
             </div>
             
             <div className="mt-4 lg:mt-0">
-              <Button variant="outline" className="gap-2">
-                <BarChart className="h-4 w-4" />
-                View Progress Report
+              <Button
+                variant="outline"
+                className="gap-2"
+                onClick={handleProgressReportClick}
+              >
+                {user?.role === 'admin' ? (
+                  <> 
+                    <PlusCircle className="h-4 w-4" />
+                    <span>Create Test Section</span> 
+                  </>
+                ) : (
+                  <> 
+                    <BarChart className="h-4 w-4" />
+                    <span>View Progress Report</span>
+                  </>
+                )}
               </Button>
             </div>
           </div>
