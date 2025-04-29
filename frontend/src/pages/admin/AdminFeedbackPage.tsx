@@ -10,15 +10,14 @@ import { toast } from 'sonner';
 import { useAuth } from '@/context/AuthContext';
 import Header from '@/components/layout/Header';
 import Footer from '@/components/layout/Footer';
-import { fetchAdminSectionSummaries, fetchAdminSectionDetails } from '@/services/api'; // Import API functions
+import { fetchAdminSectionSummaries, fetchAdminSectionDetails, getFileUrl } from '@/services/api'; // Import API functions
 import AudioPlayer from '@/components/test/AudioPlayer'; // Assuming you have this
 
 // Helper to resolve static file URLs (if needed)
-const FILES_BASE_URL = 'http://127.0.0.1:5000'; // Adjust as needed
 const resolveStaticUrl = (relativeUrl?: string | null): string => {
   if (!relativeUrl) return '';
   // Ensure no double slashes and correct base URL
-  return `${FILES_BASE_URL}${relativeUrl.startsWith('/') ? '' : '/'}${relativeUrl}`;
+  return getFileUrl(relativeUrl);
 };
 
 // Summary of a section shown on the admin review page

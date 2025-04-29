@@ -10,15 +10,13 @@ import { toast } from 'sonner';
 import { useAuth } from '@/context/AuthContext';
 import Header from '@/components/layout/Header';
 import Footer from '@/components/layout/Footer';
-import { fetchFeedbackTargetDetails, submitAdminFeedback } from '@/services/api';
-import { FeedbackTargetDetails } from '@/types';
+import { fetchFeedbackTargetDetails, submitAdminFeedback, FeedbackTargetDetails, getFileUrl } from '@/services/api';
 import AudioPlayer from '@/components/test/AudioPlayer'; // Make sure this works
 
 // Helper to resolve static file URLs
-const FILES_BASE_URL = 'http://127.0.0.1:5000'; // Adjust as needed
 const resolveStaticUrl = (relativeUrl?: string | null): string => {
     if (!relativeUrl) return '';
-    return `${FILES_BASE_URL}${relativeUrl.startsWith('/') ? '' : '/'}${relativeUrl}`;
+    return getFileUrl(relativeUrl);
 };
 
 

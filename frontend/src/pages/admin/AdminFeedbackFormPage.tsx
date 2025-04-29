@@ -10,7 +10,7 @@ import { toast } from 'sonner';
 import { useAuth } from '@/context/AuthContext';
 import Header from '@/components/layout/Header';
 import Footer from '@/components/layout/Footer';
-import { fetchFeedbackTargetDetails, submitAdminFeedback } from '@/services/api'; // Assuming these exist
+import { fetchFeedbackTargetDetails, submitAdminFeedback, getFileUrl } from '@/services/api'; // Assuming these exist
 import AudioPlayer from '@/components/test/AudioPlayer';
 
 // Define Type (adjust based on exact API response)
@@ -30,11 +30,9 @@ interface FeedbackTargetDetails {
   feedback?: string | null;
 }
 
-// Helper to resolve static file URLs (if needed)
-const FILES_BASE_URL = 'http://127.0.0.1:5000'; // Adjust as needed
 const resolveStaticUrl = (relativeUrl?: string | null): string => {
     if (!relativeUrl) return '';
-    return `${FILES_BASE_URL}${relativeUrl.startsWith('/') ? '' : '/'}${relativeUrl}`;
+    return getFileUrl(relativeUrl);
 };
 
 

@@ -8,13 +8,12 @@ import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from '@/
 import { useAuth } from '@/context/AuthContext';
 import Header from '@/components/layout/Header';
 import Footer from '@/components/layout/Footer';
-import { fetchUserSectionReviewDetails } from '@/services/api'; // Assuming this exists
+import { fetchUserSectionReviewDetails, getFileUrl } from '@/services/api'; // Assuming this exists
 import AudioPlayer from '@/components/test/AudioPlayer'; // Assuming this exists
 
-const FILES_BASE_URL = 'http://127.0.0.1:5000/files'; // Adjust as needed
 const resolveStaticUrl = (relativeUrl?: string | null): string => {
   if (!relativeUrl) return '';
-  return `${FILES_BASE_URL}${relativeUrl.startsWith('/') ? '' : '/'}${relativeUrl}`;
+  return getFileUrl(relativeUrl);
 };
 
 // Define type for detailed review data

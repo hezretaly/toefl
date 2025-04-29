@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { toast } from 'sonner';
 import { useAuth } from '@/context/AuthContext';
-import { fetchSectionById, submitSpeakingAnswers } from '@/services/api'; // Assuming this service exists and works
+import { fetchSectionById, submitSpeakingAnswers, getFileUrl } from '@/services/api'; // Assuming this service exists and works
 import Header from '@/components/layout/Header'; // Assuming these layout components exist
 import Timer from '@/components/test/Timer'; // Assuming this Timer component exists and matches the revised signature
 import AudioPlayer from '@/components/test/AudioPlayer'; // Assuming this component exists
@@ -13,8 +13,6 @@ import Footer from '@/components/layout/Footer'; // Assuming these layout compon
 
 // --- Configuration ---
 //const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://127.0.0.1:5000'; // Use env variable or default
-// const FILES_BASE_URL = `${API_BASE_URL}/files`; // Specific base for files if needed
-const FILES_BASE_URL = 'http://127.0.0.1:5000/files';
 
 // Task 1 Times
 const TASK1_INTRO_TIME = 5;
@@ -45,7 +43,7 @@ const DEFAULT_RESPONSE_TIME = 60;
 const resolveStaticUrl = (relativeUrl?: string): string => {
   if (!relativeUrl) return '';
   // Ensure no double slashes and correct base URL
-  return `${FILES_BASE_URL}${relativeUrl.startsWith('/') ? '' : '/'}${relativeUrl}`;
+  return getFileUrl(relativeUrl);
 };
 
 // --- Frontend Interfaces ---

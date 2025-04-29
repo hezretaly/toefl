@@ -7,6 +7,10 @@ import os
 import json
 import uuid
 
+from dotenv import load_dotenv
+
+load_dotenv()
+
 from sqlalchemy.orm import joinedload # For eager loading relationships
 
 from flask_cors import CORS
