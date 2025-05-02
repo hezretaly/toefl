@@ -7,7 +7,7 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { toast } from 'sonner';
 import { useAuth } from '@/context/AuthContext';
-import { fetchSectionById, submitWritingAnswers } from '@/services/api'; // Assuming this fetches the raw JSON provided
+import { fetchSectionById, submitWritingAnswers, getFileUrl } from '@/services/api'; // Assuming this fetches the raw JSON provided
 import Header from '@/components/layout/Header';
 import Timer from '@/components/test/Timer';
 import AudioPlayer from '@/components/test/AudioPlayer';
@@ -431,7 +431,7 @@ const WritingSectionPage = () => {
                           </div>
                           <div className="flex justify-center p-4 bg-gray-50 border rounded-md">
                             <AudioPlayer
-                              src={'http://127.0.0.1:5000/files/'+currentTask.audio_url} // Assuming base URL is handled or src is absolute
+                              src={getFileUrl(currentTask.audio_url)} // Assuming base URL is handled or src is absolute
                               allowReplay={true}
                             />
                           </div>
