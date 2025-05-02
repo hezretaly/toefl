@@ -11,8 +11,6 @@ import Timer from '@/components/test/Timer'; // Assuming this Timer component ex
 import AudioPlayer from '@/components/test/AudioPlayer'; // Assuming this component exists
 import Footer from '@/components/layout/Footer'; // Assuming these layout components exist
 
-// --- Configuration ---
-//const API_BASE_URL = process.env.REACT_APP_API_BASE_URL || 'http://127.0.0.1:5000'; // Use env variable or default
 
 // Task 1 Times
 const TASK1_INTRO_TIME = 5;

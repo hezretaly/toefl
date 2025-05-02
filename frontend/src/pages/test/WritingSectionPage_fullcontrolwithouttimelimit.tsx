@@ -7,11 +7,16 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Textarea } from '@/components/ui/textarea';
 import { toast } from 'sonner';
 import { useAuth } from '@/context/AuthContext';
-import { fetchSectionById } from '@/services/api'; // Assuming this fetches the raw JSON provided
+import { fetchSectionById, getFileUrl } from '@/services/api'; // Assuming this fetches the raw JSON provided
 import Header from '@/components/layout/Header';
 import Timer from '@/components/test/Timer';
 import AudioPlayer from '@/components/test/AudioPlayer';
 import Footer from '@/components/layout/Footer';
+
+const resolveStaticUrl = (relativeUrl?: string): string => {
+  if (!relativeUrl) return '';
+  return getFileUrl(relativeUrl);
+};
 
 // --- Interfaces remain the same, defining the desired structure ---
 interface WritingTask {
@@ -389,7 +394,7 @@ const WritingSectionPage = () => {
                           </div>
                           <div className="flex justify-center p-4 bg-gray-50 border rounded-md">
                             <AudioPlayer
-                              src={currentTask.audio_url} // Assuming base URL is handled or src is absolute
+                              src={resolveStaticUrl(currentTask.audio_url)} // Assuming base URL is handled or src is absolute
                               allowReplay={true}
                             />
                           </div>

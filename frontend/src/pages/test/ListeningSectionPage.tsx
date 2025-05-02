@@ -8,7 +8,7 @@ import { RadioGroup, RadioGroupItem } from '@/components/ui/radio-group';
 import { Checkbox } from '@/components/ui/checkbox';
 import { toast } from 'sonner';
 import { useAuth } from '@/context/AuthContext';
-import { fetchSectionById, submitListeningAnswers } from '@/services/api'; // Assume these are correctly implemented
+import { fetchSectionById, submitListeningAnswers, getFileUrl } from '@/services/api'; // Assume these are correctly implemented
 import Header from '@/components/layout/Header';
 import Timer from '@/components/test/Timer';
 import AudioPlayer from '@/components/test/AudioPlayer';
@@ -22,12 +22,10 @@ import {
   TableRow,
 } from "@/components/ui/table"; // Import ShadCN Table components
 
-// --- Configuration ---
-const API_BASE_URL = 'http://127.0.0.1:5000/files'; //process.env.REACT_APP_API_BASE_URL || 'http://127.0.0.1:5000';
 
 const resolveStaticUrl = (relativeUrl?: string): string => {
   if (!relativeUrl) return '';
-  return `${API_BASE_URL}${relativeUrl.startsWith('/') ? '' : '/'}${relativeUrl}`;
+  return getFileUrl(relativeUrl);
 };
 
 // --- Interfaces matching backend structure ---
